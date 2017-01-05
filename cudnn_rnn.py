@@ -46,12 +46,20 @@ parser.add_argument(
     help="time steps",
     required=True
 )
+parser.add_argument(
+    "-md",
+    "--mode_dir",
+    type=int,
+    help="Bidirectional",
+    required=True
+)
 args = parser.parse_args()
 network_type = args.network
 depth = args.depth
 batch_size = args.batch_size
 hidden_dim = args.hidden
 seq_len = args.seq_len
+mode_dir = args.mode_dir
 num_passes = 1000
 
 x_val = np.random.random((seq_len, batch_size, hidden_dim)).astype(
@@ -60,10 +68,10 @@ x_val = np.random.random((seq_len, batch_size, hidden_dim)).astype(
 y_val = np.random.random((seq_len, batch_size, hidden_dim)).astype(
     theano.config.floatX
 )
-h0_val = np.random.random((depth, batch_size, hidden_dim)).astype(
+h0_val = np.random.random((depth * mode_dir, batch_size, hidden_dim)).astype(
     theano.config.floatX
 )
-c0_val = np.random.random((depth, batch_size, hidden_dim)).astype(
+c0_val = np.random.random((depth * mode_dir, batch_size, hidden_dim)).astype(
     theano.config.floatX
 )
 
@@ -79,31 +87,49 @@ rnnb = dnn.RNNBlock(
     hidden_dim,
     depth,
     network_type,
-    input_mode='skip'
+    input_mode='linear',
+    direction_mode='unidirectional' if mode_dir == 1 else
+    'bidirectional'
 )
 psize = rnnb.get_param_size([batch_size, hidden_dim])
 params_cudnn = gpuarray_shared_constructor(
     np.zeros((psize,), dtype=theano.config.floatX)
 )
+print psize
+
+"""
+for i in range(depth):
+    dnn_params = rnnb.split_params(params_cudnn, i,
+                                   [batch_size, hidden_dim])
+    for pidx in range(len(dnn_params)):
+        print dnn_params[pidx].shape
+"""
 
 # lstm = LSTM(input_dim, hidden_dim)
-output = rnnb.apply(params_cudnn, X, h0, c0)[0]  # Only hidden states
+if network_type == 'lstm':
+    output = rnnb.apply(params_cudnn, X, h0, c0)[0]  # Only hidden states
+    params_rnn = {X: x_val, h0: h0_val, c0: c0_val}
+    params_rnn_grad = {X: x_val, Y: y_val, h0: h0_val, c0: c0_val}
+else:
+    output = rnnb.apply(params_cudnn, X, h0)[0]  # Only hidden states
+    params_rnn = {X: x_val, h0: h0_val}
+    params_rnn_grad = {X: x_val, Y: y_val, h0: h0_val}
+
 cost = T.mean((Y - output) ** 2)
 grads = T.grad(cost, params_cudnn)
 cudnn_fn = theano.function(
     inputs=[],
     outputs=output,
     mode=mode_with_gpu,
-    givens={X: x_val, h0: h0_val, c0: c0_val}
-)
+    givens=params_rnn)
+cudnn_fn()
 cudnn_grad_fn = theano.function(
     inputs=[],
     outputs=grads,
     mode=mode_with_gpu,
-    givens={X: x_val, Y: y_val, h0: h0_val, c0: c0_val}
+    givens=params_rnn_grad
 )
 
-cudnn_fn()
 cudnn_grad_fn()
 theano.sandbox.cuda.synchronize()
 print "Setup : compile + forward/backward x 1"
